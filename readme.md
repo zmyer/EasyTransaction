@@ -38,7 +38,7 @@
 对于此类事务，框架完全不介入，不执行一行额外代码
 
 #### 其他事务场景
-框架的核心依赖是Spring的TransactionSynchronization，只要使用的事务管理器继承自AbstractPlatformTransactionManager都能使用本框架（基本上事务管理器都继承自本实现）。
+框架的核心依赖是Spring的TransactionSynchronization，只要使用的事务管理器继承自AbstractPlatformTransactionManager都能使用本框架（基本上事务管理器都继承自本实现）,在此之外，1.0.0版本之后，框架使用了SPRING BOOT的配置功能，因此SPRING BOOT也是必选项（除非自行配置组装各模块）。
 
 对于分布式事务，框架会在调用远程事务方法后，将对应的框架操作挂载到TransactionSynchronization中，如：
 * 使用消息队列完成的最终一致性事务，框架将会在事务COMMIT后发发送消息，保证只有COMMIT后事务才能被外部看见，这里也省去业务开发者对于 发送-确认-检测 类型 队列实现的代码量
@@ -79,9 +79,10 @@
 	<P extends EasyTransRequest<R, E>, E extends EasyTransExecutor, R extends Serializable> Future<R> execute(P params);
     }
 
-使用方法如下：
-
-    public void buySomething(int userId,long money){
+使用方法如下，使用方直接调用远程方法即可，无需考虑具体的分布式事务类型及后续处理：
+    	
+	 @Transactional
+   	 public void buySomething(int userId,long money){
             /**
 		* 本地业务方法，下订单，并获得订单号
 		*/
@@ -100,23 +101,34 @@
 		 */
 		WalletPayTccMethodRequest deductRequest = new WalletPayTccMethodRequest();
 		deductRequest.setUserId(userId);
-		deductRequest.setPayAmount(money);
+		deductRequest.setPayAmount(money/2);
+		// 业务上可多次调用同一方法，最后生效的也是实际调用的次数
+		Future<WalletPayTccMethodResult> deductFuture = transaction.execute(deductRequest);
 		Future<WalletPayTccMethodResult> deductFuture = transaction.execute(deductRequest);
 
 		/**
 		 * 调用远程服务进行账务登记，账务服务是一个可补偿服务
 		 * 当buySomething方法对应的事务回滚了，框架将会自动调用补偿对应的业务方法
 		 * 
-		 * 实际上，使用队列消息来触发记账会更为合适，
-		 * 但是这里只是为了演示可补偿服务所以没使用队列消息
 		 */
 		AccountingRequest accountingRequest = new AccountingRequest();
 		accountingRequest.setAmount(money);
 		accountingRequest.setUserId(userId);
 		Future<AccountingResponse> accountingFuture = transaction.execute(accountingRequest);
+		
+	     /**
+		 * 
+		 * 发布消息以触发相关的业务处理，例如增加积分。这是一个可靠的消息。
+		 * 这个消息会在buySomething()的事务提交后，保证成功发布出去
+		 * 但至于消息是否成功消费，这取决于Queue接口的具体实现
+		 */
+		OrderMessage orderMessage = new OrderMessage();
+		orderMessage.setUserId(userId);
+		orderMessage.setAmount(money);
+		Future<PublishResult> reliableMessage = transaction.execute(orderMessage);
     }
 
-如上，使用方直接调用远程方法即可，无需考虑具体的分布式事务类型及后续处理。
+
 
 #### 服务提供者
 对于服务提供者，则实现对应的接口，并将其注册到Spring的Bean容器即可
@@ -181,20 +193,30 @@
 	}
 
 #### 更多例子
-请参考UT中的案例，UT中有一个MockSerivice,使用了各种场景的事务。并对事务的各种异常场景做了测试。
+请参考easytrans-starter里的UT案例，UT中有一个MockSerivice,使用了各种场景的事务。并对事务的各种异常场景做了测试。
 
-请优先配置好环境，跑起UT，以熟悉框架的使用。
+请优先配置好环境，跑起UT，以熟悉框架的使用，需要配置的内容都在application.yml中。
 
 ### 运行配置
 
 每个运行业务的库都需要新增两张表
 
     -- 用于记录业务发起方的最终业务有没有执行
+    -- p_开头的，代表本事务对应的父事务id
+    -- select for update查询时，若事务ID对应的记录不存在则事务一定失败了
+    -- 记录存在，但status为1表示事务成功,为2表示事务失败（包含父事务和本事务）
+    -- 记录存在，但status为0表示本方法存在父事务，且父事务的最终状态未知
+    -- 父事务的状态将由发起方通过 优先同步告知 失败则 消息形式告知
     CREATE TABLE `executed_trans` (
       `app_id` varchar(32) CHARACTER SET utf8 NOT NULL,
       `bus_code` varchar(128) CHARACTER SET utf8 NOT NULL,
       `trx_id` varchar(64) CHARACTER SET utf8 NOT NULL,
-      PRIMARY KEY (`app_id`,`bus_code`,`trx_id`)
+      `p_app_id` varchar(32) CHARACTER SET utf8,
+      `p_bus_code` varchar(128) CHARACTER SET utf8,
+      `p_trx_id` varchar(64) CHARACTER SET utf8,
+      `status` tinyint(1) NOT NULL,
+      PRIMARY KEY (`app_id`,`bus_code`,`trx_id`),
+      KEY `parent` (`p_app_id`,`p_bus_code`,`p_trx_id`)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_bin;
     
     -- 记录方法调用信息，用于处理幂等
@@ -204,17 +226,18 @@
 	  `src_trx_id` varchar(64) NOT NULL COMMENT '来源交易ID',
 	  `app_id` varchar(32) NOT NULL COMMENT '调用APPID',
 	  `bus_code` varchar(128) NOT NULL COMMENT '调用的业务代码',
+	  `call_seq` int(11) NOT NULL COMMENT '同一事务同一方法内调用的次数',
 	  `called_methods` varchar(128) NOT NULL COMMENT '被调用过的方法名',
 	  `md5` char(32) NOT NULL COMMENT '参数摘要',
 	  `sync_method_result` blob COMMENT '同步方法的返回结果',
 	  `create_time` datetime NOT NULL COMMENT '执行时间',
 	  `update_time` datetime NOT NULL,
 	  `lock_version` int(11) NOT NULL COMMENT '乐观锁版本号',
-	  PRIMARY KEY (`src_app_id`,`src_bus_code`,`src_trx_id`,`app_id`,`bus_code`)
+	  PRIMARY KEY (`src_app_id`,`src_bus_code`,`src_trx_id`,`app_id`,`bus_code`,`call_seq`)
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8;
 
 
-需要有一个记录事务日志的数据库，并为其创建两张表。每个业务服务都必须有对应的事务日志数据库。可多个服务共用一个，也可以一个服务单独一个事务日志。
+（基于数据库实现的事物日志）需要有一个记录事务日志的数据库，并为其创建两张表。每个业务服务都必须有对应的事务日志数据库。可多个服务共用一个，也可以一个服务单独一个事务日志。
 
     -- 记录未处理完成的事务
     CREATE TABLE `trans_log_unfinished` (
@@ -233,66 +256,68 @@
       KEY `app_id` (`trans_log_id`)
     ) ENGINE=InnoDB AUTO_INCREMENT=20 DEFAULT CHARSET=utf8;
 
+详细的配置会后续作出手册，但在此之前各位可以参考easytrans-starter里的UT案例进行
 
 
 ## 四、扩展性
 框架采用接口粘合各个模块，具有较强的扩展性，推荐 扩展、替换 的模块：
 * RPC实现
-    * 目前只支持DUBBO
-    * 欢迎增加额外实现，需实现3个核心方法
+    * 目前支持DUBBO，SPRING CLOUD RIBBON/EUREKA的支持
+    * 欢迎增加额外实现
 * 消息队列实现
-    * 目前只支持阿里ONS
+    * 目前支持阿里ONS(创建时请使用无序消息)及KAFKA
     * 欢迎增加额外实现，需实现两个核心方法
-* 配置模块实现
-    * 目前只有对外提供自由读取配置文件的实现
-    * 可自行扩展成自己的配置中心，需实现两个简单的方法
 * 序列化实现
     * 目前使用Spring-core提供的序列化，效率较低，但目前性能不是瓶颈，没做优化
     * 欢迎增加额外实现以提高效率
 * 增删改Filter具体实现类
-    * 目前只有幂等Filter
+    * 目前有幂等Filter、元数据设置FILTER、级联事务协助处理Filter
     * 若有额外需求可新增Filter
 * 数据源选择器的实现
     * 目前提供单数据源选择器
     * 若服务有多个数据源，需自行实现业务相关的数据源选择器，根据请求选择数据源
 * 事务执行日志的实现
-    * 目前提供基于数据库的执行日志读写实现
+    * 目前提供基于数据库的执行日志读写实现,正在开发KAFKA事物执行日志的支持
     * 为提高效率，可自行实现基于其他形式的事务日志，如文件系统，HBASE等，欢迎PR
 * 主从选择器
     * 目前基于ZK实现了主从选择
     * 若不想采用ZK可自行替换ZK实现
 
-## 五、后期计划
-框架还有两个功能点没有完善，一个是同库事务短路功能，一个是TCC多层传递功能，后续视业务需求考虑加上。
-
-### 嵌套的TCC/补偿的考虑
-
-* Try/Compensable记录的ID， parentTrxAppId,parentTrxId,AppId,TrxId,logType,CallerId/TOPIC,MethodId/TAG,logDetail(Params)
-* parentTrxAppId,parentTrxId为null的 补偿方法执行日志 的补偿操作 是否执行 由AppId对应的 Revocer程序决定
-* 存在parentTrxAppId,parentTrxId的执行事务记录表明其补偿是由上级决定的，收到上级的补偿操作执行指令时，先根据上级传过来的父类执行trxId，查找出本地对应的trxId,找到执行过的可补偿方法，然后对远程调用一致的补偿方法，再调用本地定义的commit/cancel/compensation
-
-### 同库短路设计
-对于同一个服务，同一个数据库的远程服务调用，可短路到同一个事务中，提高效率
-
-## 六、最佳实践
-
-### Easytrans Spring XML配置文件
-* 由架构组配置公用的XML部分，供各个业务模块IMPORT。
-* 各个业务模块自行定义DatasourceSelector这个BEAN。
-* 若事务日志存储点由各个模块自行定义，那么用于存储日志的数据源也由各个业务模块自行定义
+## 五、最佳实践
 
 ### 基于数据库的事务日志
-* 如果业务库和事务日志使用同一个数据库，那么最好为业务库和事务日志库创建不同的DataSource实例，以免产生死锁.
-* 可将各个模块的事务日志单独一个库存放，减轻单个数据库压力
-* 当数据库作为事务日志的底层实现成为瓶颈后，可自行实现一个更高效率的事务日志，如基于HBASE的事务日志
+* 将事务日志数据库与业务数据库分库库存放
 
 ### 参数及返回值
 * 因有持久化成本，请保证调用方法的参数及返回值尽量小
 
-## 七、FAQ
+## 六、FAQ
 1. 如何在CRASH后判断一个柔性事务是否提交？
 	* 在调用startEasyTrans()方法时，框架将插入一条记录到executed_trans中
 	* 在调用startEasyTrans()方法后，才可以执行远程事务方法
 	* 业务发起者（主控事务）将持有executed_trans记录的锁直到主控事务回滚或者提交
 	* 因此CRASH恢复进程使用select for update 查询executed_trans记录时，必然能得到准确的是否已经提交的结果（若主控事务仍在进行中，select for update将会等待）
 	* 使用select for update是为了避免在MVCC情况下错误查询出最终事务提交结果的情况
+	
+## 七、RELEASENOTE
+
+目前MASTER版本为1.0.0-SNAPSHOT，升级了一个大版本，计划引入较多功能，处于不稳定的开发版本状态，其相对于之前的版本主要区别为：
+
+* kafka消息队列实现（已完成）
+* 允许同一事务多次调用同一方法（已完成）
+* 解耦调用框架存储用的元数据与业务请求参数（已完成）
+* 使用spring自身的配置功能代替原来自定义的配置读取功能（已完成）
+* 使用spring boot风格改造代码，配置及使用更加方便（已完成）
+* 事务级联功能（已完成，在事务模式里，除了传统补偿模式CompensableMethod不能进行事务级联，其他都可以进行事务级联）
+* restful rpc（Spring MVC/RestTemplate/Ribbon/Eureka）实现（已完成）
+* 整合2PC，完成分布式事务各种主流场景的完整解决方案（开发中）
+* 同库短路设计（尚未开始）
+* 独立完成的DEMO（尚未开始）
+* kafka事务日志库（尚未开始）
+
+
+
+需要注意的是
+
+* 1.0版本并不往下兼容，如果需要升级使用，需要做简单代码调整及幂等记录表需要做简单的表结构调整
+* 1.0与与1.0以下版本不能混用，需全量替换
