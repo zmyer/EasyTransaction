@@ -17,6 +17,7 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.SpringBootTest.WebEnvironment;
@@ -33,6 +34,7 @@ import com.yiqiniu.easytrans.protocol.TransactionId;
 import com.yiqiniu.easytrans.rpc.EasyTransRpcConsumer;
 import com.yiqiniu.easytrans.test.mockservice.accounting.AccountingService;
 import com.yiqiniu.easytrans.test.mockservice.accounting.easytrans.AccountingCpsMethod.AccountingRequest;
+import com.yiqiniu.easytrans.test.mockservice.accounting.easytrans.AccountingCpsMethod.AccountingRequestCfg;
 import com.yiqiniu.easytrans.test.mockservice.express.ExpressService;
 import com.yiqiniu.easytrans.test.mockservice.express.easytrans.ExpressDeliverAfterTransMethod.ExpressDeliverAfterTransMethodRequest;
 import com.yiqiniu.easytrans.test.mockservice.order.NotReliableOrderMessage;
@@ -73,7 +75,7 @@ public class FullTest {
 	private PointService pointService;
 	@Resource
 	private WalletService walletService;
-	@Resource
+	@Autowired(required=false)
 	private DataBaseForLog dbForLog;
 
 	private ExecutorService executor = Executors.newFixedThreadPool(4);
@@ -110,9 +112,9 @@ public class FullTest {
 			// synchronizer test
 			// 清除创建测试初始数据
 			cleanAndSetUp();
+			
 			// 测试主事务成功，从事务也全部成功的场景
 			commitedAndSubTransSuccess();
-
 			// 测试在执行COMMIT前发生异常的场景
 			rollbackWithExceptionJustBeforeCommit();
 			// 在主事务中，远程调用执行了一半后发生异常的场景
@@ -125,6 +127,13 @@ public class FullTest {
 			commitWithExceptionInMiddleOfConsistenGuardian();
 			// 主事务回滚了，在跟进相关补偿回滚操作时候发生异常的场景
 			rollbackWithExceptionInMiddleOfConsistenGuardian();
+			
+			
+			// SAGA TRY FAILED test
+			sagaSuccessTest();
+			//wait for async execute
+			sleep(1000);
+			rollbackWithExceptionInSagaTry();
 
 			
 			// idempotent test
@@ -164,6 +173,9 @@ public class FullTest {
 			orderService.setCascadeTrxFinishedSleepMills(10000);
 			orderService.buySomethingCascading(1, 1000);//wallet 5000,account waste 5000,express count 5, point 7000
 			orderService.setCascadeTrxFinishedSleepMills(0);
+			
+			//测试自动开启事务
+			orderService.buySomethingWithAutoGenId(1, 1000);//wallet 4000,account waste 5000,express count 5, point 7000
 
 			
 		} catch (Exception e) {
@@ -171,20 +183,39 @@ public class FullTest {
 		}
 
 
-		sleep(10000);// wait for msg queue retry test finished
 		// 执行一遍后台补偿任务，以避免上述操作有未补偿成功的
 		// execute consistent guardian in case of timeout
 		List<LogCollection> unfinishedLogs = logReader.getUnfinishedLogs(null, 100, new Date());
 		for (LogCollection logCollection : unfinishedLogs) {
 			guardian.process(logCollection);
 		}
-
-		Assert.assertTrue(walletService.getUserTotalAmount(1) == 5000);
+		
+		sleep(20000);// wait for msg queue retry test finished
+		
+		Assert.assertTrue(walletService.getUserTotalAmount(1) == 3000);
 		Assert.assertTrue(walletService.getUserFreezeAmount(1) == 0);
 		Assert.assertTrue(accountingService.getTotalCost(1) == 5000);
 		Assert.assertTrue(expressService.getUserExpressCount(1) == 5);
-		Assert.assertTrue(pointService.getUserPoint(1) == 7000);
+		Assert.assertTrue(pointService.getUserPoint(1) == 8000);
 		System.out.println("Test Passed!!");
+	
+	}
+
+	private void sagaSuccessTest() {
+		orderService.sagaWalletTest(1, 1000);
+	}
+	
+	public void rollbackWithExceptionInSagaTry() {
+		try {
+			OrderService.setExceptionTag(OrderService.EXCEPTION_TAG_IN_SAGA_TRY);
+			orderService.sagaWalletTest(1, 1000);
+		} catch (UtProgramedException e) {
+			LOG.info(e.getMessage());
+		}
+		
+		//SAGA EXECUTE ASYC,so we should wait for it 
+		sleep(1000);
+		OrderService.clearExceptionSet();
 	}
 
 	public void sleep(long sleepTime) {
@@ -195,7 +226,7 @@ public class FullTest {
 			e.printStackTrace();
 		}
 	}
-
+	
 	public void testMessageQueueConsumeFailue() {
 
 		// 失败一次后成功
@@ -260,13 +291,13 @@ public class FullTest {
 
 	private void differentMethodConcurrentCompensable() {
 
-		final BusinessIdentifer annotation = AccountingRequest.class.getAnnotation(BusinessIdentifer.class);
+		final BusinessIdentifer annotation = AccountingRequestCfg.class.getAnnotation(BusinessIdentifer.class);
 		final int i = concurrentTestId++;
 
-		final AccountingRequest request = new AccountingRequest();
+		final AccountingRequestCfg request = new AccountingRequestCfg();
 		request.setAmount(1000l);
 		request.setUserId(1);
-		TransactionId parentTrxId = new TransactionId(applicationName, "concurrentTest", String.valueOf(i));
+		TransactionId parentTrxId = new TransactionId(applicationName, "concurrentTest", i);
 		HashMap<String, Object> header = new HashMap<>();
 		header.put(EasytransConstant.CallHeadKeys.PARENT_TRX_ID_KEY, parentTrxId);
 		header.put(EasytransConstant.CallHeadKeys.CALL_SEQ, 1);
@@ -326,7 +357,7 @@ public class FullTest {
 		final WalletPayTccMethodRequest request = new WalletPayTccMethodRequest();
 		request.setPayAmount(1000l);
 		request.setUserId(1);
-		TransactionId parentTrxId = new TransactionId(applicationName, "concurrentTest", String.valueOf(i));
+		TransactionId parentTrxId = new TransactionId(applicationName, "concurrentTest", i);
 		HashMap<String, Object> header = new HashMap<>();
 		header.put(EasytransConstant.CallHeadKeys.PARENT_TRX_ID_KEY, parentTrxId);
 		header.put(EasytransConstant.CallHeadKeys.CALL_SEQ, 1);
@@ -433,9 +464,11 @@ public class FullTest {
 				"INSERT INTO `wallet` (`user_id`, `total_amount`, `freeze_amount`) VALUES ('1', '10000', '0')",
 				"INSERT INTO `point` (`user_id`, `point`) VALUES ('1', '0')" });
 
-		JdbcTemplate transLogJdbcTemplate = new JdbcTemplate(dbForLog.getDataSource());
-		transLogJdbcTemplate
-				.batchUpdate(new String[] { "TRUNCATE `trans_log_unfinished`", "TRUNCATE `trans_log_detail`", });
+		if(dbForLog != null){
+			JdbcTemplate transLogJdbcTemplate = new JdbcTemplate(dbForLog.getDataSource());
+			transLogJdbcTemplate
+			.batchUpdate(new String[] { "TRUNCATE `trans_log_unfinished`", "TRUNCATE `trans_log_detail`", });
+		}
 
 	}
 
@@ -452,6 +485,8 @@ public class FullTest {
 		}
 		OrderService.clearExceptionSet();
 	}
+	
+
 
 	public void rollbackWithExceptionInMiddle() {
 		try {

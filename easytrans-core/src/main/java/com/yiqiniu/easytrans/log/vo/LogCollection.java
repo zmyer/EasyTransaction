@@ -11,13 +11,14 @@ public class LogCollection implements Serializable{
 
 	private static final long serialVersionUID = 1L;
 	
-	public LogCollection(String appId, String busCode, String trxId,
+	public LogCollection(String appId, String busCode, long trxId,
 			List<Content> orderedContents,Date createTime) {
 		super();
 		this.appId = appId;
 		this.busCode = busCode;
 		this.trxId = trxId;
 		this.orderedContents = orderedContents;
+		this.createTime = createTime;
 	}
 
 	/**
@@ -35,7 +36,7 @@ public class LogCollection implements Serializable{
 	/**
 	 * appId+busCode下唯一的事务ID
 	 */
-	private String trxId;
+	private long trxId;
 	
 	private List<Content> orderedContents;
 	
@@ -52,7 +53,7 @@ public class LogCollection implements Serializable{
 		return busCode;
 	}
 
-	public String getTrxId() {
+	public long getTrxId() {
 		return trxId;
 	}
 

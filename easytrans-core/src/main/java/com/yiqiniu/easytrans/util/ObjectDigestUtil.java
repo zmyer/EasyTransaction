@@ -8,6 +8,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Iterator;
 import java.util.Map;
+import java.util.Date;
 
 import org.springframework.util.StringUtils;
 
@@ -27,7 +28,7 @@ public class ObjectDigestUtil {
     * @param b 字节数组
     * @return 16进制字串
     */
-   private static String byteArrayToHexString(byte[] b) {
+   public static String byteArrayToHexString(byte[] b) {
        StringBuilder resultSb = new StringBuilder();
        for (byte aB : b) {
            resultSb.append(byteToHexString(aB));
@@ -50,6 +51,18 @@ public class ObjectDigestUtil {
        return hexDigits[d1] + hexDigits[d2];
    }
 	
+   public static byte[] hexStringToByteArray(String s) {
+	    int len = s.length();
+	    byte[] data = new byte[len / 2];
+	    for (int i = 0; i < len; i += 2) {
+	        data[i / 2] = (byte) ((Character.digit(s.charAt(i), 16) << 4)
+	                             + Character.digit(s.charAt(i+1), 16));
+	    }
+	    return data;
+	}
+   
+   
+	
 	public static String getObjectMD5(Object obj) {
 		return MD5Encode(getObjectString(obj));
 	}
@@ -69,7 +82,27 @@ public class ObjectDigestUtil {
 			md.update(resultString.getBytes("UTF-8"));
 			resultString = byteArrayToHexString(md.digest());
 		} catch (Exception e) {
-			e.printStackTrace();
+			throw new RuntimeException(e);
+		}
+		return resultString;
+	}
+	
+
+	/**
+	 * MD5编码
+	 * 
+	 * @param origin
+	 *            原始字符串
+	 * @return 经过MD5加密之后的结果
+	 */
+	public static String MD5Encode(byte[] origin) {
+		String resultString = null;
+		try {
+			MessageDigest md = MessageDigest.getInstance("MD5");
+			md.update(origin);
+			resultString = byteArrayToHexString(md.digest());
+		} catch (Exception e) {
+			throw new RuntimeException(e);
 		}
 		return resultString;
 	}
@@ -93,6 +126,8 @@ public class ObjectDigestUtil {
 			return getItrValue(itrPropertie);
 		} else if (o instanceof Map) {
 			return getOrderedMapString((Map) o);
+		} else if (o instanceof Date) {
+			return getTimestampValue((Date)o);
 		} else {
 			return getComlpexObjectOrderedString(o);
 		}
@@ -215,6 +250,10 @@ public class ObjectDigestUtil {
 			return true;
 		}
 		return false;
+	}
+
+	private static String getTimestampValue(Date o) {
+		return String.valueOf(o.getTime());
 	}
 
 }

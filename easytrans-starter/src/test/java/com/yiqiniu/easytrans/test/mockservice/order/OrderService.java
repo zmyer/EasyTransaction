@@ -23,11 +23,13 @@ import com.yiqiniu.easytrans.core.EasyTransFacade;
 import com.yiqiniu.easytrans.protocol.msg.PublishResult;
 import com.yiqiniu.easytrans.test.Constant;
 import com.yiqiniu.easytrans.test.mockservice.TestUtil;
+import com.yiqiniu.easytrans.test.mockservice.accounting.easytrans.AccountingApi;
 import com.yiqiniu.easytrans.test.mockservice.accounting.easytrans.AccountingCpsMethod.AccountingRequest;
 import com.yiqiniu.easytrans.test.mockservice.accounting.easytrans.AccountingCpsMethod.AccountingResponse;
 import com.yiqiniu.easytrans.test.mockservice.express.easytrans.ExpressDeliverAfterTransMethod.AfterMasterTransMethodResult;
 import com.yiqiniu.easytrans.test.mockservice.express.easytrans.ExpressDeliverAfterTransMethod.ExpressDeliverAfterTransMethodRequest;
 import com.yiqiniu.easytrans.test.mockservice.wallet.easytrans.WalletPayCascadeTccMethod.WalletPayCascadeTccMethodRequest;
+import com.yiqiniu.easytrans.test.mockservice.wallet.easytrans.WalletPaySagaTccMethod.WalletPaySagaTccMethodRequest;
 import com.yiqiniu.easytrans.test.mockservice.wallet.easytrans.WalletPayTccMethod.WalletPayTccMethodRequest;
 import com.yiqiniu.easytrans.test.mockservice.wallet.easytrans.WalletPayTccMethod.WalletPayTccMethodResult;
 
@@ -39,6 +41,7 @@ public class OrderService {
 	public static final String EXCEPTION_TAG_JUST_AFTER_START_EASY_TRANSACTION = "JustAfterStartEasyTrans";
 	public static final String EXCEPTION_TAG_IN_MIDDLE_OF_CONSISTENT_GUARDIAN_WITH_SUCCESS_MASTER_TRANS = "InMiddleOfConsistentGuardianWithSuccessMasterTrans";
 	public static final String EXCEPTION_TAG_IN_MIDDLE_OF_CONSISTENT_GUARDIAN_WITH_ROLLEDBACK_MASTER_TRANS = "InMiddleOfConsistentGuardianWithRolledBackMasterTrans";
+	public static final String EXCEPTION_TAG_IN_SAGA_TRY = "EXCEPTION_TAG_IN_SAGA_TRY";
 
 	@Resource
 	private TestUtil util;
@@ -99,9 +102,11 @@ public class OrderService {
 
 	@Resource
 	private EasyTransFacade transaction;
+	@Resource
+	private AccountingApi accountApi;
 	
 	public int getUserOrderCount(int userId){
-		JdbcTemplate jdbcTemplate = util.getJdbcTemplate(Constant.APPID, BUSINESS_CODE, String.valueOf(userId));
+		JdbcTemplate jdbcTemplate = util.getJdbcTemplate(Constant.APPID, BUSINESS_CODE, userId);
 		Integer queryForObject = jdbcTemplate.queryForObject("SELECT count(1) FROM `order` where user_id = ?;", Integer.class,userId);
 		return queryForObject == null?0:queryForObject;
 	}
@@ -109,10 +114,10 @@ public class OrderService {
 	@Transactional("buySthTransactionManager")
 	public void buySomethingCascading(int userId,long money){
 		
-		JdbcTemplate jdbcTemplate = util.getJdbcTemplate(Constant.APPID, BUSINESS_CODE_CASCADE, String.valueOf(userId));
+		JdbcTemplate jdbcTemplate = util.getJdbcTemplate(Constant.APPID, BUSINESS_CODE_CASCADE, userId);
 		Integer id = saveOrderRecord(jdbcTemplate,userId,money);
 
-		transaction.startEasyTrans(BUSINESS_CODE_CASCADE, String.valueOf(id));
+		transaction.startEasyTrans(BUSINESS_CODE_CASCADE, id);
 		
 		/**
 		 * 调用级联事务
@@ -141,6 +146,44 @@ public class OrderService {
 	
 	}
 	
+	@Transactional("buySthTransactionManager")
+	public void buySomethingWithAutoGenId(int userId,long money){
+		
+		JdbcTemplate jdbcTemplate = util.getJdbcTemplate(Constant.APPID, BUSINESS_CODE, userId);
+		saveOrderRecord(jdbcTemplate,userId,money);
+		
+		/**
+		 * call remote service to deduct money, it's a TCC service,
+		 * framework will maintains the eventually constancy based on the final transaction status of method buySomething 
+		 * 
+		 * 调用远程服务扣除所需的钱,这个远程服务实现了TCC接口,
+		 * 框架会根据buySomething方法的事务结果来维护远程服务的最终一致性
+		 */
+		WalletPayTccMethodRequest deductRequest = new WalletPayTccMethodRequest();
+		deductRequest.setUserId(userId);
+		deductRequest.setPayAmount(money);
+		transaction.execute(deductRequest);
+
+	}
+	
+	@Transactional("buySthTransactionManager")
+	public void sagaWalletTest(int userId,long money) {
+		WalletPaySagaTccMethodRequest sagaDeductRequest = new WalletPaySagaTccMethodRequest();
+		sagaDeductRequest.setUserId(userId);
+		sagaDeductRequest.setPayAmount(money/2);
+		transaction.execute(sagaDeductRequest);
+		
+		WalletPayTccMethodRequest deductRequest = new WalletPayTccMethodRequest();
+		deductRequest.setUserId(userId);
+		deductRequest.setPayAmount(money/2);
+		transaction.execute(deductRequest);
+		
+		OrderMessage orderMessage = new OrderMessage();
+		orderMessage.setUserId(userId);
+		orderMessage.setAmount(money);
+		transaction.execute(orderMessage);		
+	}
+	
 	
 	@Transactional("buySthTransactionManager")
 	public Future<AfterMasterTransMethodResult> buySomething(int userId,long money){
@@ -150,7 +193,7 @@ public class OrderService {
 		 * 
 		 * 优先完成本地事务以 1. 提高性能（减少异常时回滚消耗）2. 生成事务内交易ID 
 		 */
-		JdbcTemplate jdbcTemplate = util.getJdbcTemplate(Constant.APPID, BUSINESS_CODE, String.valueOf(userId));
+		JdbcTemplate jdbcTemplate = util.getJdbcTemplate(Constant.APPID, BUSINESS_CODE, userId);
 		Integer id = saveOrderRecord(jdbcTemplate,userId,money);
 		
 		/**
@@ -160,7 +203,7 @@ public class OrderService {
 		 * 声明全局事务ID，其由appId,业务代码，业务代码内ID构成
 		 * 如果这个方法没有被调用，那么后续的EasyTransFacade.execute方法调用会抛异常
 		 */
-		transaction.startEasyTrans(BUSINESS_CODE, String.valueOf(id));
+		transaction.startEasyTrans(BUSINESS_CODE, id);
 		checkThrowException(EXCEPTION_TAG_JUST_AFTER_START_EASY_TRANSACTION);
 		
 		/**
@@ -172,14 +215,25 @@ public class OrderService {
 		 */
 		WalletPayTccMethodRequest deductRequest = new WalletPayTccMethodRequest();
 		deductRequest.setUserId(userId);
-		deductRequest.setPayAmount(money/2);
+		deductRequest.setPayAmount(money/10);
+		
 		//return future for the benefits of performance enhance(batch write execute log and batch execute RPC)
 		//返回future是为了能方便的优化性能(批量写日志及批量调用RPC)
 		Future<WalletPayTccMethodResult> deductFuture = null;
 		if(checkExecuteForTestCase(deductRequest.getClass())){
 			/**
-			 * 执行两遍，每次都扣一半的钱，以测试相同方法在业务上调用两次的场景
+			 * 执行10遍，每次都扣十分之一钱，以测试相同方法在业务上调用多次的场景
+			 * 因之前版本不支持同一事物内调用同一个方法多次，这里只是测试调用多次的场景，并无其他特殊含义
 			 */
+			// tcc
+			deductFuture = transaction.execute(deductRequest);
+			deductFuture = transaction.execute(deductRequest);
+			deductFuture = transaction.execute(deductRequest);
+			deductFuture = transaction.execute(deductRequest);
+			deductFuture = transaction.execute(deductRequest);
+			deductFuture = transaction.execute(deductRequest);
+			deductFuture = transaction.execute(deductRequest);
+			deductFuture = transaction.execute(deductRequest);
 			deductFuture = transaction.execute(deductRequest);
 			deductFuture = transaction.execute(deductRequest);
 		}
@@ -207,7 +261,7 @@ public class OrderService {
 		accountingRequest.setUserId(userId);
 		if(checkExecuteForTestCase(accountingRequest.getClass())){
 			@SuppressWarnings("unused")
-			Future<AccountingResponse> accountingFuture = transaction.execute(accountingRequest);
+			Future<AccountingResponse> accountingFuture = accountApi.accounting(accountingRequest);
 		}
 		
 		checkThrowException(EXCEPTION_TAG_IN_THE_MIDDLE);

@@ -75,7 +75,11 @@ public class EasyTransSynchronizer {
 	 * @param busCode the unique busCode in AppId
 	 * @param trxId the unique trxId in appId+busCode
 	 */
-	public void startSoftTrans(String busCode,String trxId){
+	public void startSoftTrans(String busCode,long trxId){
+		
+		if(isSoftTransBegon()) {
+			throw new RuntimeException("transaction already started,but try to start again." + busCode + "," + trxId);
+		}
 		
 		//hook to TransactionSynchronizer
 		TransactionSynchronizationManager.registerSynchronization(new TransactionHook());
@@ -85,8 +89,12 @@ public class EasyTransSynchronizer {
 		//check whether is a parent transaction
 		TransactionId pTrxId = getParentTransactionId();
 		if(pTrxId == null){
+			
 			//if this transaction is roll back, this record is will disappear
-			transStatusLogger.writeExecuteFlag(applicationName, busCode, trxId, null, null, null, TransactionStatus.COMMITTED);
+			//transStatusLogger.writeExecuteFlag(applicationName, busCode, trxId, null, null, null, TransactionStatus.COMMITTED);
+			
+			// since introduced SAGA, Global-transaction status can not be determined by master transaction commit 
+			transStatusLogger.writeExecuteFlag(applicationName, busCode, trxId, null, null, null, TransactionStatus.UNKNOWN);
 		} else {
 			//a transaction with parent transaction,it's status depends on parent
 			//check whether the parent transaction status is determined
@@ -96,6 +104,10 @@ public class EasyTransSynchronizer {
 			} 
 			transStatusLogger.writeExecuteFlag(applicationName, busCode, trxId, pTrxId.getAppId(), pTrxId.getBusCode(), pTrxId.getTrxId(), pTransStatus);
 		}
+	}
+	
+	public boolean isSoftTransBegon() {
+		return innerGetLogProcessContent() != null;
 	}
 
 	public void registerLog(Content content){
@@ -108,11 +120,15 @@ public class EasyTransSynchronizer {
 	 * @return
 	 */
 	public LogProcessContext getLogProcessContext() {
-		LogProcessContext logProcessContext = (LogProcessContext) TransactionSynchronizationManager.getResource(LOG_PROCESS_CONTEXT);
+		LogProcessContext logProcessContext = innerGetLogProcessContent();
 		if(logProcessContext == null){
 			throw new RuntimeException("please call TransController.startSoftTrans() before executeMethods!");
 		}
 		return logProcessContext;
+	}
+
+	private LogProcessContext innerGetLogProcessContent() {
+		return (LogProcessContext) TransactionSynchronizationManager.getResource(LOG_PROCESS_CONTEXT);
 	}
 	
 	private void unbindLogProcessContext(){
@@ -159,7 +175,8 @@ public class EasyTransSynchronizer {
 						}
 					}
 				} else {
-					logProcessContext.setFinalMasterTransStatus(true);
+					//since introduced SAGA, transactionStatus can not be determined by the DB commit of master
+					logProcessContext.setFinalMasterTransStatus(null);
 				}
 				break;
 			case STATUS_ROLLED_BACK:

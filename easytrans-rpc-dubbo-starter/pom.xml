@@ -2,29 +2,30 @@
   <modelVersion>4.0.0</modelVersion>
   
   <artifactId>easytrans-rpc-dubbo-starter</artifactId>
+  <name>EasyTransaction RPC dubbo implement</name>
+  
 
   	<parent>
 		  <groupId>com.yiqiniu.easytrans</groupId>
 		  <artifactId>easytrans</artifactId>
-		  <version>${easytrans.version}</version>
+		  <version>${revision}</version>
+		  <relativePath>../pom.xml</relativePath>
 	</parent>
   
 	<properties>
 		<project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-		<easytrans.version>1.0.0-SNAPSHOT</easytrans.version>
 	</properties>
 
 <dependencies>
 	<dependency>
 		<groupId>com.yiqiniu.easytrans</groupId>
 		<artifactId>easytrans-core</artifactId>
-		<version>${easytrans.version}</version>
 	</dependency>
 
 	<dependency>
 		<groupId>com.alibaba</groupId>
 		<artifactId>dubbo</artifactId>
-		<version>2.5.3</version>
+		<version>2.6.3</version>
 	</dependency>
 
 	<dependency>

@@ -15,17 +15,48 @@ import org.springframework.transaction.annotation.EnableTransactionManagement;
 
 import com.alibaba.druid.pool.DruidDataSource;
 import com.yiqiniu.easytrans.EnableEasyTransaction;
-import com.yiqiniu.easytrans.log.impl.database.EnableLogDatabaseImpl;
+import com.yiqiniu.easytrans.queue.QueueTopicMapper;
+import com.yiqiniu.easytrans.test.mockservice.accounting.easytrans.AccountingApi;
+import com.yiqiniu.easytrans.test.mockservice.accounting.easytrans.AccountingCpsMethod.AccountingRequestCfg;
+import com.yiqiniu.easytrans.util.CallWrapUtil;
 
 @SpringBootApplication
 @EnableEasyTransaction
 @ComponentScan(basePackages={"com.yiqiniu.easytrans.test.mockservice"})
+//@EnableRpcRestRibbonImpl default
+//@EnableLogDatabaseImpl default
+//@EnableQueueKafkaImpl default
 //@EnableQueueOnsImpl
 //@EnableRpcDubboImpl
-@EnableLogDatabaseImpl
+//@EnableLogRedisImpl
 @EnableTransactionManagement
 @EnableAutoConfiguration(exclude=DataSourceAutoConfiguration.class)
 public class EasyTransTestConfiguration {
+	
+	@Bean
+	public AccountingApi accountingApi(CallWrapUtil util) {
+		return util.createTransactionCallInstance(AccountingApi.class, AccountingRequestCfg.class);
+	}
+	
+	/**
+	 * 本BEAN用于配置appid+busCode的映射关系，如果不提供该bean则使用默认实现IdenticalQueueTopicMapper
+	 * @return
+	 */
+	@Bean
+	public QueueTopicMapper mapper(){
+		return new QueueTopicMapper() {
+			
+			@Override
+			public String[] mapToTopicTag(String appid, String busCode) {
+				return new String[]{"TestPrefix" + appid, busCode};
+			}
+			
+			@Override
+			public String[] mapToAppIdBusCode(String topic, String tag) {
+				return new String[]{topic.replace("TestPrefix", ""), tag};
+			}
+		};
+	}
 	
 	@Component
 	@ConfigurationProperties(prefix="easytrans.test.database")
